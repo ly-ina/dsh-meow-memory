@@ -15,6 +15,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, renameSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { fillTemplate, getPromptLang, keyedValue } from './prompt-loader.js'
@@ -206,8 +207,30 @@ const SCHEMAS: Record<Level, string> = {
     project TEXT)`, // project 可空：null=全局准则（高 importance 全量注入），非空=项目特定（memory_project 注入）
 }
 
+/**
+ * 全局记忆库（lanxi fork）：默认落在 `%DSH_HOME%/soulweave/memory.db`，
+ * 可用 MEOW_MEMORY_DB 覆盖。旧路径 `.dsh-meow/memory.db` 仅在全局库
+ * 不存在、且旧库存在时作为回退，避免误建空库把旧记忆"藏起来"。
+ */
+const GLOBAL_MEMORY_DB =
+  process.env.MEOW_MEMORY_DB ||
+  join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'soulweave', 'memory.db')
+let globalDbFallbackWarned = false
+
 /** 记忆库路径：workspace 是项目根（cwd），目录名单独传（防双拼）。 */
 export function memoryDbPath(workspace: string, dir = '.dsh-meow'): string {
+  if (GLOBAL_MEMORY_DB) {
+    if (existsSync(GLOBAL_MEMORY_DB)) return GLOBAL_MEMORY_DB
+    const legacy = join(workspace, dir, 'memory.db')
+    if (existsSync(legacy)) {
+      if (!globalDbFallbackWarned) {
+        globalDbFallbackWarned = true
+        console.warn(`[meow-memory] 全局记忆库不存在，暂时回退旧库：${legacy}`)
+      }
+      return legacy
+    }
+    return GLOBAL_MEMORY_DB
+  }
   return join(workspace, dir, 'memory.db')
 }
 
@@ -853,10 +876,10 @@ const dbCache = new Map<string, MemoryDb>()
 
 /** 取工作区 DB（缓存复用）。workspace = 项目根（cwd）。 */
 export function getDb(workspace: string, dir = '.dsh-meow'): MemoryDb {
-  const key = `${workspace}\u0000${dir}`
+  const path = memoryDbPath(workspace, dir)
+  const key = path
   let db = dbCache.get(key)
   if (!db) {
-    const path = memoryDbPath(workspace, dir)
     // 信任门（#64）：memory.db 不存在 = 即将由本插件创建的空库。当时 .dsh-meow
     // 目录为空/不存在 → 登记为「本机创建」（信任）；目录已有预置文件（PROJECT.md /
     // sessions/ / memory.db.bak 等）→ 不登记，保持未信任等 /meow-trust。
